@@ -1,0 +1,261 @@
+version: '3.8'
+
+services:
+  proxy:
+    image: traefik
+    container_name: traefik
+    depends_on: 
+      - authelia
+    restart: unless-stopped
+    command:
+      - "--log.level=DEBUG"
+      - "--api.insecure=true"
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--certificatesresolvers.letsencrypt.acme.dnschallenge=true"
+      - "--certificatesresolvers.letsencrypt.acme.dnschallenge.provider=${DNS_PROVIDER}"
+      - "--certificatesresolvers.letsencrypt.acme.email=${LETSENCRYPT_EMAIL}"
+      - "--certificatesresolvers.letsencrypt.acme.dnschallenge.disablePropagationCheck=true"
+      - "--certificatesresolvers.letsencrypt.acme.dnschallenge.resolvers=1.1.1.1:53,8.8.8.8:53"
+      - "--certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json"
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.web.http.redirections.entrypoint.to=websecure"
+      - "--entrypoints.web.http.redirections.entrypoint.scheme=https"
+      - "--entrypoints.websecure.address=:443"
+      - "--entrypoints.websecure.http.tls=true"
+      - "--entrypoints.websecure.http.tls.certResolver=letsencrypt"
+      - "--entrypoints.websecure.http.tls.domains[0].main=${MY_DOMAIN}"
+      - "--entrypoints.websecure.http.tls.domains[0].sans=*.${MY_DOMAIN}"
+    volumes:
+      - "./data/traefik/letsencrypt:/letsencrypt"
+      - "/var/run/docker.sock:/var/run/docker.sock:ro"
+    labels:
+      - 'traefik.enable=true'
+      - 'traefik.http.routers.api.rule=Host(`${MY_DOMAIN}`)'
+      - 'traefik.http.routers.api.entryPoints=websecure'
+      - 'traefik.http.routers.api.service=api@internal'
+      - 'traefik.http.routers.api.middlewares=authelia@docker'
+    ports:
+      - "443:443"
+      - "80:80"
+    environment:
+      DNS_PROVIDER: "${DNS_PROVIDER}"
+      LETSENCRYPT_EMAIL: "${LETSENCRYPT_EMAIL}"
+      DNS_PROVIDER_TOKEN: "${DNS_PROVIDER_TOKEN}"
+
+  authelia_redis:
+    image: redis
+    restart: unless-stopped
+    container_name: authelia_redis
+
+  authelia_generate_secrets:
+    build: generate_secrets
+    volumes:
+      - ./data/authelia/secrets:/secrets
+
+  authelia:
+    image: authelia/authelia
+    container_name: authelia
+    labels:
+      - 'traefik.enable=true'
+      - 'traefik.http.routers.authelia.rule=Host(`auth.${MY_DOMAIN}`)'
+      - 'traefik.http.routers.authelia.entryPoints=websecure'
+      - 'traefik.http.middlewares.authelia.forwardAuth.address=http://authelia:9091/api/authz/forward-auth'
+      - 'traefik.http.middlewares.authelia.forwardAuth.trustForwardHeader=true'
+      - 'traefik.http.middlewares.authelia.forwardAuth.authResponseHeaders=Remote-User,Remote-Groups,Remote-Email,Remote-Name'
+    depends_on:
+      authelia_generate_secrets:
+        condition: service_completed_successfully
+    volumes:
+      - ./data/authelia:/config
+    restart: unless-stopped
+    expose: 
+      - 9091
+    environment:
+      TZ: ${TZ}
+      X_AUTHELIA_CONFIG_FILTERS: template
+      MY_DOMAIN: ${MY_DOMAIN}
+      AUTHELIA_IDENTITY_VALIDATION_RESET_PASSWORD_JWT_SECRET_FILE: /config/secrets/JWT_SECRET
+      AUTHELIA_SESSION_SECRET_FILE: /config/secrets/SESSION_SECRET
+      AUTHELIA_STORAGE_ENCRYPTION_KEY_FILE: /config/secrets/STORAGE_ENCRYPTION_KEY
+
+  sonarr:
+    container_name: sonarr
+    image: linuxserver/sonarr:latest
+    restart: unless-stopped
+    labels:
+      - 'traefik.enable=true'
+      - 'traefik.http.routers.sonarr.rule=Host(`sonarr.${MY_DOMAIN}`)'
+      - 'traefik.http.routers.sonarr.entryPoints=websecure'
+      - 'traefik.http.routers.sonarr.middlewares=authelia@docker'
+    environment:
+      TZ: ${TZ}
+    volumes:
+      - ./data/sonarr:/config
+      - /path/to/media/TV:/tv
+      - /path/to/media/Downloads:/downloads
+
+  radarr:
+    container_name: radarr
+    image: linuxserver/radarr:latest
+    restart: unless-stopped
+    labels:
+      - 'traefik.enable=true'
+      - 'traefik.http.routers.radarr.rule=Host(`radarr.${MY_DOMAIN}`)'
+      - 'traefik.http.routers.radarr.entryPoints=websecure'
+      - 'traefik.http.routers.radarr.middlewares=authelia@docker'
+    environment:
+      TZ: ${TZ}
+    volumes:
+      - ./data/radarr:/config
+      - /path/to/media/Movies:/movies
+      - /path/to/media/Downloads:/downloads
+
+  deluge:
+    container_name: deluge
+    image: linuxserver/deluge:latest
+    restart: unless-stopped
+    labels:
+      - 'traefik.enable=true'
+      - 'traefik.http.routers.deluge.rule=Host(`deluge.${MY_DOMAIN}`)'
+      - 'traefik.http.routers.deluge.entryPoints=websecure'
+      - 'traefik.http.routers.deluge.middlewares=authelia@docker'
+    environment:
+      TZ: ${TZ}
+    volumes:
+      - ./data/deluge:/config
+      - /path/to/media/Downloads:/downloads
+
+  jellyfin:
+    container_name: jellyfin
+    image: jellyfin/jellyfin:latest
+    restart: unless-stopped
+    labels:
+      - 'traefik.enable=true'
+      - 'traefik.http.routers.jellyfin.rule=Host(`jellyfin.${MY_DOMAIN}`)'
+      - 'traefik.http.routers.jellyfin.entryPoints=websecure'
+    environment:
+      TZ: ${TZ}
+    volumes:
+      - ./data/jellyfin:/config
+      - /path/to/media/Movies:/movies
+      - /path/to/media/TV:/tv
+
+  vaultwarden:
+    image: vaultwarden/server:latest
+    container_name: vaultwarden
+    restart: unless-stopped
+    environment:
+      WEBSOCKET_ENABLED: 'true'
+      SIGNUPS_ALLOWED: 'false'
+    volumes:
+      - "./data/vaultwarden:/data"
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.vaultwarden.rule=Host(`vault.${MY_DOMAIN}`)"
+      - "traefik.http.routers.vaultwarden.service=vaultwarden"
+      - "traefik.http.routers.vaultwarden.entrypoints=websecure"
+      - "traefik.http.services.vaultwarden.loadbalancer.server.port=80"
+      - "traefik.http.routers.vaultwarden.tls=true"
+      - "traefik.http.routers.vaultwarden.tls.certresolver=letsencrypt"
+      - "traefik.http.services.vaultwarden.loadbalancer.passhostheader=true"
+      - "traefik.http.routers.vaultwarden.middlewares=compresstraefik"
+      - "traefik.http.middlewares.compresstraefik.compress=true"
+      - "traefik.docker.network=traefik-network"
+
+  minecraft:
+    image: itzg/minecraft-server:latest
+    container_name: minecraft
+    environment:
+      EULA: "TRUE"
+      OVERRIDE_SERVER_PROPERTIES: "TRUE"
+      TYPE: "VANILLA"
+      WHITELIST: "true"
+      OPS: "${MINECRAFT_OPS}"
+    stdin_open: true
+    tty: true
+    ports:
+      - "25565:25565"
+    volumes:
+      - ./data/minecraft:/data 
+
+  nextcloud:
+    image: nextcloud:latest
+    container_name: nextcloud
+    restart: unless-stopped
+    depends_on:
+      - db
+    environment:
+      - MYSQL_PASSWORD=/run/secrets/db_password
+      - MYSQL_DATABASE=nextcloud
+      - MYSQL_USER=nextcloud
+      - MYSQL_HOST=db
+    volumes:
+      - /path/to/media/nextcloud:/var/www/html
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.nextcloud.rule=Host(`cloud.${MY_DOMAIN}`)"
+      - "traefik.http.services.nextcloud.loadbalancer.server.port=80"
+      - "traefik.http.routers.nextcloud.entrypoints=websecure"
+      - "traefik.http.routers.nextcloud.tls.certresolver=letsencrypt"
+    secrets:
+      - db_password
+
+  linkwarden:
+    image: ghcr.io/linkwarden/linkwarden:latest
+    container_name: linkwarden
+    restart: unless-stopped
+    environment:
+      - DATABASE_URL=postgres://linkwarden:/run/secrets/db-password@linkwarden-db:5432/linkwarden
+      - NODE_ENV=production
+    volumes:
+      - /path/to/media/linkwarden:/data/data
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.linkwarden.rule=Host(`bookmarks.${MY_DOMAIN}`)"
+      - "traefik.http.services.linkwarden.loadbalancer.server.port=3000"
+      - "traefik.http.routers.linkwarden.entrypoints=websecure"
+      - "traefik.http.routers.linkwarden.tls.certresolver=letsencrypt"
+    secrets:
+      - db_password
+
+  linkwarden-db:
+    image: postgres:latest
+    container_name: linkwarden-db
+    restart: unless-stopped
+    environment:
+      - POSTGRES_DB=linkwarden
+      - POSTGRES_USER=linkwarden
+      - POSTGRES_PASSWORD=/run/secrets/db-password
+    volumes: 
+      - /path/to/media/pgdata:/var/lib/postgresql/data
+    secrets:
+      - db_password
+
+  db:
+    image: mariadb:latest
+    container_name: nextcloud-db
+    restart: unless-stopped
+    environment:
+      - MYSQL_ROOT_PASSWORD=/run/secrets/db_root_password
+      - MYSQL_DATABASE=nextcloud
+      - MYSQL_USER=nextcloud
+      - MYSQL_PASSWORD=/run/secrets/db_password
+      - innodb_use_native_aio=OFF
+    volumes:
+      - /path/to/media/db:/var/lib/mysql
+    secrets:
+      - db_root_password
+      - db_password
+
+secrets:
+  db_root_password:
+    file: ./secrets/db_root_password.txt
+  db_password:
+    file: ./secrets/db_password.txt
+
+networks:
+  default:
+    external:
+      name: traefik-network
+
